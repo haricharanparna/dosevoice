@@ -1,14 +1,14 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Med, Scan } from "@/lib/types";
 import { fileToDataUrl, sampleLabelDataUrl, speak, stopSpeaking, to12h } from "@/lib/client";
 import TimesEditor from "./TimesEditor";
 import {
-  IconAlert, IconArrowRight, IconCamera, IconCheck, IconImage, IconShield, IconSparkles, IconSun, IconUpload, IconVolume,
+  IconAlert, IconArrowRight, IconCamera, IconCheck, IconImage, IconShield, IconSparkles, IconSun, IconUndo, IconUpload, IconVolume, IconX,
 } from "./Icons";
 
-type Phase = "idle" | "scanning" | "result" | "error";
+type Phase = "idle" | "camera" | "scanning" | "result" | "error";
 
 type Props = {
   autoRead: boolean;
@@ -35,6 +35,76 @@ export default function ScanView({ autoRead, onSaved }: Props) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [announce, setAnnounce] = useState("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [facing, setFacing] = useState<"environment" | "user">("environment");
+  const [camCount, setCamCount] = useState(0);
+  const [camReady, setCamReady] = useState(false);
+
+  function stopCamera() {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setCamReady(false);
+  }
+  useEffect(() => stopCamera, []);
+
+  // Live in-page camera. Falls back to the device's photo picker if the browser can't open one.
+  async function openCamera(mode: "environment" | "user" = facing) {
+    stopSpeaking();
+    if (!navigator.mediaDevices?.getUserMedia) { cameraRef.current?.click(); return; }
+    stopCamera();
+    setPreview(null);
+    setError("");
+    setPhase("camera");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: mode }, width: { ideal: 1920 }, height: { ideal: 1440 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setFacing(mode);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setCamCount(devices.filter((d) => d.kind === "videoinput").length);
+      const hint = "Camera is on. Hold the label inside the frame, then press Capture.";
+      setAnnounce(hint);
+      if (autoRead) speak(hint);
+    } catch (e) {
+      stopCamera();
+      const name = (e as DOMException)?.name;
+      const msg = name === "NotAllowedError"
+        ? "Camera access was blocked. Allow the camera from the icon in your address bar, or upload a photo instead."
+        : name === "NotFoundError" || name === "OverconstrainedError"
+          ? "No camera was found on this device. You can upload a photo instead."
+          : "The camera couldn't start. Close other apps using it, or upload a photo instead.";
+      setError(msg);
+      setPhase("error");
+      setAnnounce(msg);
+      if (autoRead) speak(msg);
+    }
+  }
+
+  function capture() {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return;
+    const scale = Math.min(1, 1600 / Math.max(v.videoWidth, v.videoHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(v.videoWidth * scale);
+    c.height = Math.round(v.videoHeight * scale);
+    c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height);
+    const shot = c.toDataURL("image/jpeg", 0.9);
+    stopCamera();
+    run(shot);
+  }
+
+  function cancelCamera() {
+    stopCamera();
+    setPhase("idle");
+    setAnnounce("Camera closed.");
+  }
 
   async function run(image: string) {
     setPreview(image);
@@ -76,6 +146,7 @@ export default function ScanView({ autoRead, onSaved }: Props) {
 
   function reset() {
     stopSpeaking();
+    stopCamera();
     setPhase("idle");
     setPreview(null);
     setScan(null);
@@ -192,7 +263,7 @@ export default function ScanView({ autoRead, onSaved }: Props) {
               <button className="btn btn-primary btn-lg" onClick={save} disabled={saving || !draft.drugName.trim()}>
                 <IconCheck /> {saving ? "Saving…" : "Save to my medications"}
               </button>
-              <button className="btn btn-lg" onClick={() => cameraRef.current?.click()}>
+              <button className="btn btn-lg" onClick={() => { reset(); openCamera(); }}>
                 <IconCamera /> Retake
               </button>
             </div>
@@ -212,11 +283,24 @@ export default function ScanView({ autoRead, onSaved }: Props) {
       </header>
 
       <div className="scan-hero">
-        <div className="viewfinder" aria-hidden={phase !== "scanning"}>
+        <div className={`viewfinder${phase === "camera" ? " is-live" : ""}`} aria-hidden={phase !== "scanning" && phase !== "camera"}>
+          {phase === "camera" && (
+            <video ref={(el) => {
+                videoRef.current = el;
+                if (el && streamRef.current && el.srcObject !== streamRef.current) {
+                  el.srcObject = streamRef.current;
+                  el.play().catch(() => {});
+                }
+              }} className="vf-video" playsInline muted autoPlay aria-label="Live camera view"
+              onLoadedData={() => setCamReady(true)} style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }} />
+          )}
           <span className="vf-corner tl" /><span className="vf-corner tr" />
           <span className="vf-corner bl" /><span className="vf-corner br" />
+          {phase === "camera" && !camReady && (
+            <span className="vf-status"><span className="spinner" /> Starting camera…</span>
+          )}
           {preview && <img src={preview} alt="" />}
-          {phase === "scanning" ? (
+          {phase === "camera" ? null : phase === "scanning" ? (
             <>
               <span className="scanline" />
               <span className="vf-status"><span className="spinner" /> Reading label with Gemini…</span>
@@ -241,16 +325,37 @@ export default function ScanView({ autoRead, onSaved }: Props) {
               </div>
             </div>
           )}
-          <button className="btn btn-primary btn-lg btn-block" onClick={() => cameraRef.current?.click()} disabled={phase === "scanning"}
-            style={{ minHeight: 68, fontSize: "1.15rem" }}>
-            <IconCamera size={24} /> {phase === "error" ? "Try again" : "Take a photo"}
-          </button>
-          <button className="btn btn-lg btn-block" onClick={() => uploadRef.current?.click()} disabled={phase === "scanning"}>
-            <IconUpload /> Upload an image
-          </button>
-          <button className="btn btn-ghost btn-block" onClick={() => run(sampleLabelDataUrl())} disabled={phase === "scanning"}>
-            <IconSparkles size={20} /> No bottle handy? Try a sample label <IconArrowRight size={18} />
-          </button>
+          {phase === "camera" ? (
+            <>
+              <button className="btn btn-primary btn-lg btn-block" onClick={capture} disabled={!camReady} autoFocus
+                style={{ minHeight: 76, fontSize: "1.2rem" }}>
+                <span className="shutter-dot" aria-hidden="true" /> Capture
+              </button>
+              <div className="btn-row">
+                {camCount > 1 && (
+                  <button className="btn btn-lg" style={{ flex: 1 }} onClick={() => openCamera(facing === "environment" ? "user" : "environment")}>
+                    <IconUndo size={20} /> Switch camera
+                  </button>
+                )}
+                <button className="btn btn-lg" style={{ flex: 1 }} onClick={cancelCamera}>
+                  <IconX size={20} /> Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-primary btn-lg btn-block" onClick={() => openCamera()} disabled={phase === "scanning"}
+                style={{ minHeight: 68, fontSize: "1.15rem" }}>
+                <IconCamera size={24} /> {phase === "error" ? "Try again" : "Take a photo"}
+              </button>
+              <button className="btn btn-lg btn-block" onClick={() => uploadRef.current?.click()} disabled={phase === "scanning"}>
+                <IconUpload /> Upload an image
+              </button>
+              <button className="btn btn-ghost btn-block" onClick={() => run(sampleLabelDataUrl())} disabled={phase === "scanning"}>
+                <IconSparkles size={20} /> No bottle handy? Try a sample label <IconArrowRight size={18} />
+              </button>
+            </>
+          )}
           {phase === "error" && <button className="btn btn-ghost btn-block" onClick={reset}>Start over</button>}
 
           <div className="tips" aria-label="Tips for a good scan">
