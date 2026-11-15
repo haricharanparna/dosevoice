@@ -6,6 +6,10 @@ export type Scan = {
   suggestedTimes: string[];
   warnings: string[];
   plainSummary: string;
+  /** Key fields not readable in any photo, e.g. ["directions"]. */
+  missing: ("name" | "strength" | "directions")[];
+  /** What to photograph next when something is missing. */
+  retakeHint: string;
   confidence: "high" | "medium" | "low";
 };
 

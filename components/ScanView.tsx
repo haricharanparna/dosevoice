@@ -19,10 +19,13 @@ function spokenFor(s: Scan) {
   let t = s.plainSummary;
   if (s.isMedicationLabel) {
     if (s.warnings.length) t += ` Warnings: ${s.warnings.map((w) => w.trim().replace(/[.!?]+$/, "")).join(". ")}.`;
-    if (s.confidence === "low") t += " Parts of this label were hard to read. Please confirm with your pharmacist.";
+    if (s.missing?.length && s.retakeHint) t += ` ${s.retakeHint}`;
+    else if (s.confidence === "low") t += " Parts of this label were hard to read. Please confirm with your pharmacist.";
   }
   return t;
 }
+
+const MISSING_LABEL: Record<string, string> = { name: "medication name", strength: "strength", directions: "directions" };
 
 export default function ScanView({ autoRead, onSaved }: Props) {
   const cameraRef = useRef<HTMLInputElement>(null);
@@ -40,6 +43,10 @@ export default function ScanView({ autoRead, onSaved }: Props) {
   const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [camCount, setCamCount] = useState(0);
   const [camReady, setCamReady] = useState(false);
+  // Photos of different sides of the same bottle, read together.
+  const [shots, setShots] = useState<string[]>([]);
+  const appendRef = useRef(false);
+  const adding = appendRef.current && !!scan;
 
   function stopCamera() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -49,7 +56,8 @@ export default function ScanView({ autoRead, onSaved }: Props) {
   useEffect(() => stopCamera, []);
 
   // Live in-page camera. Falls back to the device's photo picker if the browser can't open one.
-  async function openCamera(mode: "environment" | "user" = facing) {
+  async function openCamera(mode: "environment" | "user" = facing, append = appendRef.current) {
+    appendRef.current = append;
     stopSpeaking();
     if (!navigator.mediaDevices?.getUserMedia) { cameraRef.current?.click(); return; }
     stopCamera();
@@ -69,7 +77,9 @@ export default function ScanView({ autoRead, onSaved }: Props) {
       }
       const devices = await navigator.mediaDevices.enumerateDevices();
       setCamCount(devices.filter((d) => d.kind === "videoinput").length);
-      const hint = "Camera is on. Hold the label inside the frame, then press Capture.";
+      const hint = append
+        ? "Camera is on. Turn the bottle so the directions face the camera, then press Capture."
+        : "Camera is on. Hold the label inside the frame, then press Capture.";
       setAnnounce(hint);
       if (autoRead) speak(hint);
     } catch (e) {
@@ -97,30 +107,54 @@ export default function ScanView({ autoRead, onSaved }: Props) {
     c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height);
     const shot = c.toDataURL("image/jpeg", 0.9);
     stopCamera();
-    run(shot);
+    run(shot, appendRef.current);
   }
 
   function cancelCamera() {
     stopCamera();
-    setPhase("idle");
+    if (appendRef.current && scan) {
+      appendRef.current = false;
+      setPreview(shots[shots.length - 1] ?? null);
+      setPhase("result");
+    } else {
+      setPhase("idle");
+    }
     setAnnounce("Camera closed.");
   }
 
-  async function run(image: string) {
+  function addSide(how: "camera" | "upload") {
+    appendRef.current = true;
+    if (how === "camera") openCamera(facing, true);
+    else uploadRef.current?.click();
+  }
+
+  async function run(image: string, append = false) {
+    const prevScan = scan;
+    const prevShots = shots;
+    const combining = append && !!prevScan;
+    const next = combining ? [...prevShots, image].slice(-4) : [image];
+    appendRef.current = false;
+    setShots(next);
     setPreview(image);
     setPhase("scanning");
     setError("");
-    setAnnounce("Reading the label. One moment.");
-    if (autoRead) speak("Reading the label. One moment.");
+    const wait = combining ? "Reading both sides together. One moment." : "Reading the label. One moment.";
+    setAnnounce(wait);
+    if (autoRead) speak(wait);
     try {
       const r = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image }),
+        body: JSON.stringify({ images: next }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Scan failed");
       const s = j as Scan;
+      s.missing ??= [];
+      if (!s.isMedicationLabel && combining) {
+        // The extra photo didn't help; keep what we already had.
+        throw new Error(s.plainSummary || "That photo didn't show the label. Try again.");
+      }
       setScan(s);
       setDraft({ drugName: s.drugName, strength: s.strength, instructions: s.instructions });
       setTimes(s.suggestedTimes);
@@ -131,17 +165,26 @@ export default function ScanView({ autoRead, onSaved }: Props) {
       if (autoRead) speak(said);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Something went wrong.";
-      setError(msg);
-      setPhase("error");
       setAnnounce(msg);
       if (autoRead) speak(msg);
+      if (combining) {
+        // Go back to the earlier result rather than losing it.
+        setShots(prevShots);
+        setPreview(prevShots[prevShots.length - 1] ?? null);
+        setError(msg);
+        setPhase("result");
+        return;
+      }
+      setError(msg);
+      setPhase("error");
     }
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
-    if (file) run(await fileToDataUrl(file));
+    if (file) run(await fileToDataUrl(file), appendRef.current);
+    else appendRef.current = false;
   }
 
   function reset() {
@@ -150,6 +193,8 @@ export default function ScanView({ autoRead, onSaved }: Props) {
     setPhase("idle");
     setPreview(null);
     setScan(null);
+    setShots([]);
+    appendRef.current = false;
     setError("");
   }
 
@@ -207,13 +252,44 @@ export default function ScanView({ autoRead, onSaved }: Props) {
                 <h2 id="drug-h" className="drug-name">{draft.drugName || "Unnamed medication"}</h2>
                 <p className="drug-strength">{draft.strength}</p>
               </div>
-              <span className={`badge ${conf === "high" ? "badge-ok" : conf === "medium" ? "badge-info" : "badge-warn"}`}>
-                {conf === "low" ? <IconAlert size={14} /> : <IconCheck size={14} />}
-                {conf === "high" ? "Clear read" : conf === "medium" ? "Mostly clear" : "Hard to read"}
-              </span>
+              {scan.missing.length > 0 ? (
+                <span className="badge badge-warn"><IconAlert size={14} /> Needs another side</span>
+              ) : (
+                <span className={`badge ${conf === "high" ? "badge-ok" : conf === "medium" ? "badge-info" : "badge-warn"}`}>
+                  {conf === "low" ? <IconAlert size={14} /> : <IconCheck size={14} />}
+                  {conf === "high" ? "Clear read" : conf === "medium" ? "Mostly clear" : "Hard to read"}
+                </span>
+              )}
             </div>
 
-            {conf === "low" && (
+            {scan.missing.length > 0 && (
+              <div className="callout callout-warn missing-box" style={{ marginTop: 16 }} role="alert">
+                <IconCamera size={22} />
+                <div style={{ flex: 1 }}>
+                  <p style={{ fontWeight: 750 }}>
+                    Missing the {scan.missing.map((m) => MISSING_LABEL[m] ?? m).join(" and ")}
+                  </p>
+                  <p style={{ marginTop: 4 }}>{scan.retakeHint}</p>
+                  <div className="btn-row" style={{ marginTop: 12 }}>
+                    <button className="btn btn-primary" onClick={() => addSide("camera")}>
+                      <IconCamera size={20} /> Photograph the {scan.missing.includes("directions") ? "directions side" : "other side"}
+                    </button>
+                    <button className="btn" onClick={() => addSide("upload")}>
+                      <IconUpload size={20} /> Upload it
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {shots.length > 1 && (
+              <div className="sides-row" aria-label={`${shots.length} photos read together`}>
+                {shots.map((s, i) => <img key={i} src={s} alt="" />)}
+                <span><IconCheck size={16} /> {shots.length} sides read together</span>
+              </div>
+            )}
+
+            {conf === "low" && scan.missing.length === 0 && (
               <div className="callout callout-warn" style={{ marginTop: 16 }} role="note">
                 <IconAlert size={20} />
                 <p>Parts of this label were hard to read. Double-check the details below, or confirm with your pharmacist.</p>
@@ -277,9 +353,19 @@ export default function ScanView({ autoRead, onSaved }: Props) {
     <div className="fade-in">
       {inputs}
       <header className="page-head">
-        <p className="eyebrow">Scan</p>
-        <h1 className="title">Scan a prescription label</h1>
-        <p className="subtitle">DoseVoice reads the small print out loud and builds your reminders.</p>
+        {adding ? (
+          <>
+            <p className="eyebrow">Add another side</p>
+            <h1 className="title">Show me the directions</h1>
+            <p className="subtitle">Turn the bottle so the side that says how much to take and how often faces the camera.</p>
+          </>
+        ) : (
+          <>
+            <p className="eyebrow">Scan</p>
+            <h1 className="title">Scan a prescription label</h1>
+            <p className="subtitle">DoseVoice reads the small print out loud and builds your reminders.</p>
+          </>
+        )}
       </header>
 
       <div className="scan-hero">
