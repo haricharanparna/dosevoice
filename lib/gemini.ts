@@ -37,7 +37,10 @@ export async function geminiJSON<T>(parts: unknown[], schema: object): Promise<T
     }
 
     if (res.status === 429) {
-      throw new GeminiError("Gemini's free-tier rate limit was hit. Wait a minute and try again.", 429);
+      // Each model has its own free-tier quota, so try the next one before giving up.
+      console.error(`Gemini ${model} rate-limited`);
+      lastError = new GeminiError("Gemini's free-tier rate limit was hit. Wait a minute and try again.", 429);
+      continue;
     }
     if (res.status === 404 || res.status >= 500) {
       console.error(`Gemini ${model} failed`, res.status, await res.text());
