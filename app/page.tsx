@@ -159,10 +159,74 @@ export default function Home() {
     setReminder(r);
     const msg = `Time to take ${r.med.drugName}, ${r.med.strength}. ${r.med.instructions}`;
     speak(msg);
-    if ("Notification" in window && Notification.permission === "granted") {
-      try { new Notification(`Time for ${r.med.drugName}`, { body: `${r.med.strength} · ${r.med.instructions}`, tag: `${r.med._id}-${r.time}` }); } catch { /* mobile may need SW */ }
-    }
+    void notify(r);
   }
+
+  // Browser notification with "I took it" / "Snooze" buttons. Uses the service worker
+  // (required on Android Chrome), falling back to a plain notification on desktop.
+  async function notify(r: Reminder) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    const title = `${r.test ? "Test: " : ""}Time for ${r.med.drugName}`;
+    const body = `${to12h(r.time)} · ${r.med.strength}. ${r.med.instructions}`;
+    const tag = `dv-${r.med._id}-${r.time}`;
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      if (reg) {
+        await reg.showNotification(title, {
+          body, tag, requireInteraction: true, icon: "/icon.svg", badge: "/icon.svg",
+          data: { medId: r.med._id, time: r.time, date: dateKey(), test: !!r.test },
+          actions: [{ action: "take", title: "I took it" }, { action: "snooze", title: "Snooze 10 min" }],
+        } as NotificationOptions);
+        return;
+      }
+    } catch { /* fall through */ }
+    try { new Notification(title, { body, tag, requireInteraction: true }); } catch { /* unsupported */ }
+  }
+
+  async function closeNotification(r: Reminder) {
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      (await reg?.getNotifications({ tag: `dv-${r.med._id}-${r.time}` }))?.forEach((n) => n.close());
+    } catch { /* ignore */ }
+  }
+
+  // Register the service worker once.
+  useEffect(() => {
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }, []);
+
+  // Buttons pressed on a notification (handled by the service worker) come back here.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMsg = (e: MessageEvent) => {
+      const m = e.data || {};
+      if (m.type === "dv-dose-taken") {
+        setReminder(null);
+        if (!m.test) loadDoses(dateKey());
+        const med = meds.find((x) => x._id === m.medId);
+        showToast({ msg: m.test ? "Test reminder: marked as taken" : `${med?.drugName ?? "Dose"} marked as taken` });
+      } else if (m.type === "dv-snooze") {
+        const med = meds.find((x) => x._id === m.medId);
+        if (med) snooze({ med, time: m.time, test: m.test });
+        else if (m.test && reminder) snooze(reminder);
+      } else if (m.type === "dv-open-reminder") {
+        const med = meds.find((x) => x._id === m.medId);
+        if (med) setReminder({ med, time: m.time });
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+  }); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While a reminder is open, flash the tab title so it's noticeable from another tab.
+  useEffect(() => {
+    if (!reminder) return;
+    const base = document.title;
+    const alt = `⏰ Time for ${reminder.med.drugName}`;
+    let on = false;
+    const id = setInterval(() => { on = !on; document.title = on ? alt : base; }, 1000);
+    return () => { clearInterval(id); document.title = base; void closeNotification(reminder); };
+  }, [reminder]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function snooze(r: Reminder) {
     if (!r.test) snoozed.current.set(`${r.med._id}|${r.time}`, Date.now() + 10 * 60_000);

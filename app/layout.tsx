@@ -6,6 +6,7 @@ const sans = Plus_Jakarta_Sans({ subsets: ["latin"], variable: "--font-sans", di
 
 export const metadata: Metadata = {
   title: "DoseVoice: hear your medication labels",
+  icons: { icon: "/icon.svg", apple: "/icon.svg" },
   description: "Point your camera at a medication label. Hear what it says. Never miss a dose.",
 };
 
