@@ -5,7 +5,14 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json({ meds: await listMeds(), storage: usingMongo() ? "mongodb" : "memory" });
+  try {
+    return NextResponse.json({ meds: await listMeds(), storage: usingMongo() ? "mongodb" : "memory" });
+  } catch (e) {
+    const err = e as Error;
+    console.error("Database error", err);
+    // Report the kind of failure only, never the connection string.
+    return NextResponse.json({ error: "Database unreachable", reason: err.name, code: (err as { code?: unknown }).code ?? null }, { status: 503 });
+  }
 }
 
 export async function POST(req: Request) {

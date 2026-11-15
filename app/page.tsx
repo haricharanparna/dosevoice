@@ -74,22 +74,31 @@ export default function Home() {
 
   // ── Data ──
   const loadMeds = useCallback(async () => {
-    const j = await fetch("/api/meds").then((r) => r.json());
+    const r = await fetch("/api/meds");
+    if (!r.ok) throw new Error(`meds ${r.status}`);
+    const j = await r.json();
     setMeds(j.meds ?? []);
     setStorage(j.storage ?? "");
     return (j.meds ?? []) as Med[];
   }, []);
   const loadDoses = useCallback(async (date: string) => {
-    const j = await fetch(`/api/doses?date=${date}`).then((r) => r.json());
+    const r = await fetch(`/api/doses?date=${date}`);
+    if (!r.ok) throw new Error(`doses ${r.status}`);
+    const j = await r.json();
     setDoses(j.doses ?? []);
   }, []);
   useEffect(() => {
-    Promise.all([loadMeds(), loadDoses(dateKey())]).then(([m]) => {
-      setLoaded(true);
-      if (!m.length && !isTab(location.hash.slice(1))) setTabState("scan");
-    });
+    Promise.all([loadMeds(), loadDoses(dateKey())])
+      .then(([m]) => {
+        if (!m.length && !isTab(location.hash.slice(1))) setTabState("scan");
+      })
+      .catch(() => {
+        setTabState("scan");
+        setToast({ msg: "Couldn't load your saved medications. You can still scan labels." });
+      })
+      .finally(() => setLoaded(true));
   }, [loadMeds, loadDoses]);
-  useEffect(() => { if (loaded) loadDoses(today); }, [today, loaded, loadDoses]);
+  useEffect(() => { if (loaded) loadDoses(today).catch(() => {}); }, [today, loaded, loadDoses]);
 
   // ── Toasts ──
   const showToast = useCallback((t: Toast) => {
@@ -202,7 +211,7 @@ export default function Home() {
       const m = e.data || {};
       if (m.type === "dv-dose-taken") {
         setReminder(null);
-        if (!m.test) loadDoses(dateKey());
+        if (!m.test) loadDoses(dateKey()).catch(() => {});
         const med = meds.find((x) => x._id === m.medId);
         showToast({ msg: m.test ? "Test reminder: marked as taken" : `${med?.drugName ?? "Dose"} marked as taken` });
       } else if (m.type === "dv-snooze") {

@@ -16,8 +16,12 @@ export function usingMongo() {
 }
 
 async function db(): Promise<Db> {
-  if (!clientPromise) clientPromise = new MongoClient(process.env.MONGODB_URI as string).connect();
-  return (await clientPromise).db(process.env.MONGODB_DB || "dosevoice");
+  if (!clientPromise) {
+    clientPromise = new MongoClient((process.env.MONGODB_URI as string).trim(), { serverSelectionTimeoutMS: 8000 })
+      .connect()
+      .catch((e) => { clientPromise = null; throw e; }); // retry on the next request instead of caching the failure
+  }
+  return (await clientPromise).db(process.env.MONGODB_DB?.trim() || "dosevoice");
 }
 const meds = async (): Promise<Collection<MedDoc>> => (await db()).collection<MedDoc>("meds");
 const doses = async (): Promise<Collection<DoseDoc>> => (await db()).collection<DoseDoc>("doses");
